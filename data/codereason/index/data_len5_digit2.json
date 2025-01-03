@@ -1,0 +1,142 @@
+[
+  {
+    "clean_prefix": ">>> scores = [48, 85, 27, 43, 46]\n>>> scores[3]\n",
+    "patch_prefix": ">>> scores = [48, 85, 27, 43, 46]\n>>> scores[9]\n",
+    "clean_answer": "4",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> scores = [48, 85, 27, 43, 46]\n>>> scores[9]\n",
+    "patch_prefix": ">>> scores = [48, 85, 27, 43, 46]\n>>> scores[3]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "4",
+    "case": "index_len5_digit2_err"
+  },
+  {
+    "clean_prefix": ">>> items = [88, 47, 40, 25, 84]\n>>> items[2]\n",
+    "patch_prefix": ">>> items = [88, 47, 40, 25, 84]\n>>> items[6]\n",
+    "clean_answer": "4",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> items = [88, 47, 40, 25, 84]\n>>> items[6]\n",
+    "patch_prefix": ">>> items = [88, 47, 40, 25, 84]\n>>> items[2]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "4",
+    "case": "index_len5_digit2_err"
+  },
+  {
+    "clean_prefix": ">>> age = [91, 21, 40, 75, 21]\n>>> age[1]\n",
+    "patch_prefix": ">>> age = [91, 21, 40, 75, 21]\n>>> age[9]\n",
+    "clean_answer": "2",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> age = [91, 21, 40, 75, 21]\n>>> age[9]\n",
+    "patch_prefix": ">>> age = [91, 21, 40, 75, 21]\n>>> age[1]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "2",
+    "case": "index_len5_digit2_err"
+  },
+  {
+    "clean_prefix": ">>> items = [98, 66, 58, 59, 41]\n>>> items[1]\n",
+    "patch_prefix": ">>> items = [98, 66, 58, 59, 41]\n>>> items[6]\n",
+    "clean_answer": "6",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> items = [98, 66, 58, 59, 41]\n>>> items[6]\n",
+    "patch_prefix": ">>> items = [98, 66, 58, 59, 41]\n>>> items[1]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "6",
+    "case": "index_len5_digit2_err"
+  },
+  {
+    "clean_prefix": ">>> values = [51, 47, 55, 66, 39]\n>>> values[3]\n",
+    "patch_prefix": ">>> values = [51, 47, 55, 66, 39]\n>>> values[6]\n",
+    "clean_answer": "6",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> values = [51, 47, 55, 66, 39]\n>>> values[6]\n",
+    "patch_prefix": ">>> values = [51, 47, 55, 66, 39]\n>>> values[3]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "6",
+    "case": "index_len5_digit2_err"
+  },
+  {
+    "clean_prefix": ">>> values = [24, 35, 95, 45, 34]\n>>> values[2]\n",
+    "patch_prefix": ">>> values = [24, 35, 95, 45, 34]\n>>> values[7]\n",
+    "clean_answer": "9",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> values = [24, 35, 95, 45, 34]\n>>> values[7]\n",
+    "patch_prefix": ">>> values = [24, 35, 95, 45, 34]\n>>> values[2]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "9",
+    "case": "index_len5_digit2_err"
+  },
+  {
+    "clean_prefix": ">>> data = [82, 65, 97, 75, 74]\n>>> data[1]\n",
+    "patch_prefix": ">>> data = [82, 65, 97, 75, 74]\n>>> data[9]\n",
+    "clean_answer": "6",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> data = [82, 65, 97, 75, 74]\n>>> data[9]\n",
+    "patch_prefix": ">>> data = [82, 65, 97, 75, 74]\n>>> data[1]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "6",
+    "case": "index_len5_digit2_err"
+  },
+  {
+    "clean_prefix": ">>> data = [93, 24, 63, 96, 48]\n>>> data[0]\n",
+    "patch_prefix": ">>> data = [93, 24, 63, 96, 48]\n>>> data[9]\n",
+    "clean_answer": "9",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> data = [93, 24, 63, 96, 48]\n>>> data[9]\n",
+    "patch_prefix": ">>> data = [93, 24, 63, 96, 48]\n>>> data[0]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "9",
+    "case": "index_len5_digit2_err"
+  },
+  {
+    "clean_prefix": ">>> values = [67, 24, 93, 95, 33]\n>>> values[2]\n",
+    "patch_prefix": ">>> values = [67, 24, 93, 95, 33]\n>>> values[6]\n",
+    "clean_answer": "9",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> values = [67, 24, 93, 95, 33]\n>>> values[6]\n",
+    "patch_prefix": ">>> values = [67, 24, 93, 95, 33]\n>>> values[2]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "9",
+    "case": "index_len5_digit2_err"
+  },
+  {
+    "clean_prefix": ">>> age = [57, 64, 20, 47, 11]\n>>> age[3]\n",
+    "patch_prefix": ">>> age = [57, 64, 20, 47, 11]\n>>> age[8]\n",
+    "clean_answer": "4",
+    "patch_answer": "Traceback",
+    "case": "index_len5_digit2_no_err"
+  },
+  {
+    "clean_prefix": ">>> age = [57, 64, 20, 47, 11]\n>>> age[8]\n",
+    "patch_prefix": ">>> age = [57, 64, 20, 47, 11]\n>>> age[3]\n",
+    "clean_answer": "Traceback",
+    "patch_answer": "4",
+    "case": "index_len5_digit2_err"
+  }
+]

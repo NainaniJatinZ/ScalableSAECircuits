@@ -231,8 +231,6 @@ def produce_ig_binary_masks(saes, threshold=0.01):
         masks=masks
     )
 
-
-
 def build_sae_hook_fn(
     # Core components
     sae,
@@ -244,16 +242,15 @@ def build_sae_hook_fn(
     binarize_mask=False,
     mean_mask=False,
     ig_mask_threshold=None,
-    
     # Caching behavior
     cache_sae_grads=False,
     cache_masked_activations=False,
     cache_sae_activations=False,
-    
     # Ablation options
     mean_ablate=False,  # Controls mean ablation of the SAE
     fake_activations=False,  # Controls whether to use fake activations
-    ):    # make the mask for the sequence
+    ):    
+    # make the mask for the sequence
     mask = torch.ones_like(sequence, dtype=torch.bool)
     # mask[sequence == pad_token_id] = False
     mask[sequence == bos_token_id] = False # where mask is false, keep original
@@ -287,8 +284,7 @@ def build_sae_hook_fn(
                 feature_acts = sae.igmask(feature_acts, threshold=ig_mask_threshold, mean_ablation=sae.mean_ablation)
             else:
                 feature_acts = sae.igmask(feature_acts, threshold=ig_mask_threshold)
-
-                
+  
         if circuit_mask is not None:
             hook_point = sae.cfg.hook_name
             if mean_mask==True:
@@ -307,7 +303,6 @@ def build_sae_hook_fn(
         value = torch.where(mask_expanded, out, value)
         return value
     return sae_hook
-
 
 def run_sae_hook_fn(model, saes,
                 sequence,
@@ -329,57 +324,12 @@ def run_sae_hook_fn(model, saes,
     hooks = []
     bos_token_id = model.tokenizer.bos_token_id
     for sae in saes: 
-        mask = torch.ones_like(sequence, dtype=torch.bool)
-        mask[sequence == bos_token_id] = False 
-        def sae_hook(value, hook):
-            feature_acts = sae.encode(value)
-            feature_acts = feature_acts * mask.unsqueeze(-1)
-            if fake_activations != False and sae.cfg.hook_layer == fake_activations[0]:
-                feature_acts = fake_activations[1]
-            if cache_sae_grads:
-                raise NotImplementedError("torch is confusing")
-                sae.feature_acts = feature_acts.requires_grad_(True)
-                sae.feature_acts.retain_grad()
-            
-            if cache_sae_activations:
-                sae.feature_acts = feature_acts.detach().clone()
-            
-            # Learned Binary Masking
-            if use_mask:
-                if mean_mask:
-                    # apply the mask, with mean ablations
-                    feature_acts = sae.mask(feature_acts, binary=binarize_mask, mean_ablation=sae.mean_ablation)
-                else:
-                    # apply the mask, without mean ablations
-                    feature_acts = sae.mask(feature_acts, binary=binarize_mask)
-
-            # IG Masking
-            if ig_mask_threshold != None:
-                # apply the ig mask
-                if mean_mask:
-                    feature_acts = sae.igmask(feature_acts, threshold=ig_mask_threshold, mean_ablation=sae.mean_ablation)
-                else:
-                    feature_acts = sae.igmask(feature_acts, threshold=ig_mask_threshold)
-
-            if circuit_mask is not None:
-                hook_point = sae.cfg.hook_name
-                if mean_mask==True:
-                    feature_acts = circuit_mask(feature_acts, hook_point, mean_ablation=sae.mean_ablation)
-                else:
-                    feature_acts = circuit_mask(feature_acts, hook_point)
-                
-            if cache_masked_activations:
-                sae.feature_acts = feature_acts.detach().clone()
-            if mean_ablate:
-                feature_acts = sae.mean_ablation
-
-            out = sae.decode(feature_acts)
-            # choose out or value based on the mask
-            mask_expanded = mask.unsqueeze(-1).expand_as(value)
-            value = torch.where(mask_expanded, out, value)
-            return value
-        
-        hooks.append((sae.cfg.hook_name, sae_hook))
+        hooks.append(
+            (
+            sae.cfg.hook_name,
+            build_sae_hook_fn(sae, sequence, bos_token_id, cache_sae_grads=cache_sae_grads, circuit_mask=circuit_mask, use_mask=use_mask, binarize_mask=binarize_mask, cache_masked_activations=cache_masked_activations, cache_sae_activations=cache_sae_activations, mean_mask=mean_mask, mean_ablate=mean_ablate, fake_activations=fake_activations, ig_mask_threshold=ig_mask_threshold),
+            )
+        )
 
     return model.run_with_hooks(
             sequence, 
