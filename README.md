@@ -7,4 +7,6 @@ We propose a novel approach to:
 - Developing a Better Circuit-Finding Algorithm: Our method uses a binary masking optimization over SAE latents, which proves significantly more effective than existing methods like Attribution Patching or Integrated Gradients.
 
 
+Main Masking notebook: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NainaniJatinZ/ScalableSAECircuits/blob/main/ScalableSAECircuits_Colab.ipynb)
+
 Lesswrong post link: 
