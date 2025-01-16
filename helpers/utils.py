@@ -249,6 +249,9 @@ def build_sae_hook_fn(
     # Ablation options
     mean_ablate=False,  # Controls mean ablation of the SAE
     fake_activations=False,  # Controls whether to use fake activations
+    calc_error=False,
+    use_error=False, 
+    use_mean_error=False
     ):    
     # make the mask for the sequence
     mask = torch.ones_like(sequence, dtype=torch.bool)
@@ -300,8 +303,15 @@ def build_sae_hook_fn(
         out = sae.decode(feature_acts)
         # choose out or value based on the mask
         mask_expanded = mask.unsqueeze(-1).expand_as(value)
-        value = torch.where(mask_expanded, out, value)
-        return value
+        updated_value = torch.where(mask_expanded, out, value)
+        if calc_error:
+            sae.error_term = value - updated_value 
+            if use_error:
+                return updated_value + sae.error_term
+    
+        if use_mean_error:
+            return updated_value + sae.mean_error
+        return updated_value
     return sae_hook
 
 def run_sae_hook_fn(model, saes,
@@ -320,6 +330,9 @@ def run_sae_hook_fn(model, saes,
 
     mean_ablate=False,  # Controls mean ablation of the SAE
     fake_activations=False,  # Controls whether to use fake activations)
+    calc_error=False,
+    use_error=False, 
+    use_mean_error=False
     ):
     hooks = []
     bos_token_id = model.tokenizer.bos_token_id
@@ -327,7 +340,8 @@ def run_sae_hook_fn(model, saes,
         hooks.append(
             (
             sae.cfg.hook_name,
-            build_sae_hook_fn(sae, sequence, bos_token_id, cache_sae_grads=cache_sae_grads, circuit_mask=circuit_mask, use_mask=use_mask, binarize_mask=binarize_mask, cache_masked_activations=cache_masked_activations, cache_sae_activations=cache_sae_activations, mean_mask=mean_mask, mean_ablate=mean_ablate, fake_activations=fake_activations, ig_mask_threshold=ig_mask_threshold),
+            build_sae_hook_fn(sae, sequence, bos_token_id, cache_sae_grads=cache_sae_grads, circuit_mask=circuit_mask, use_mask=use_mask, binarize_mask=binarize_mask, cache_masked_activations=cache_masked_activations, cache_sae_activations=cache_sae_activations, mean_mask=mean_mask, mean_ablate=mean_ablate, fake_activations=fake_activations, ig_mask_threshold=ig_mask_threshold, calc_error=calc_error, use_error=use_error, 
+            use_mean_error=use_mean_error),
             )
         )
 
