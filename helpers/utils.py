@@ -139,7 +139,6 @@ class SAEMasks(nn.Module):
         for mask in self.masks:
             num_latents += (mask>0).sum().item()
         return num_latents
-
 class SparseMask(nn.Module):
     def __init__(self, shape, l1, seq_len=None, distinct_l1=0):
         super().__init__()
@@ -169,9 +168,11 @@ class SparseMask(nn.Module):
 
         self.temperature = self.max_temp ** self.ratio_trained
         mask = torch.sigmoid(self.mask * self.temperature)
-        self.sparsity_loss = torch.abs(mask).sum() * self.distinct_l1
-        if len(mask.shape) == 2:
-            self.distinct_sparsity_loss = torch.abs(mask).max(dim=0).values.sum() * self.l1
+        # mask = self.mask
+        self.sparsity_loss = torch.abs(mask).sum() * self.l1
+        # print("hello", torch.abs(mask).sum()) 
+        # if len(mask.shape) == 2:
+        #     self.distinct_sparsity_loss = torch.abs(mask).max(dim=0).values.sum() * self.distinct_l1
 
         if mean_ablation is None:
             return x * mask
@@ -376,6 +377,30 @@ def get_sae_means(model, saes, mean_tokens, total_batches, batch_size, per_token
                 break
     return saes
 
+def get_sae_error_means(model, saes, mean_tokens, total_batches, batch_size, per_token_mask=False, device="cuda:0"):
+    for sae in saes:
+        sae.mean_error = torch.zeros(sae.cfg.d_in).float().to(device)
+    
+    with tqdm(total=total_batches*batch_size, desc="Mean Accum Progress") as pbar:
+        for i in range(total_batches):
+            for j in range(batch_size):
+                with torch.no_grad():
+                    _ = run_sae_hook_fn(model, saes, mean_tokens[i, j], calc_error=True)
+                    
+                    #model.run_with_hooks(
+                        # mean_tokens[i, j], 
+                        # return_type="logits", 
+                        # fwd_hooks=build_hooks_list(mean_tokens[i, j], cache_sae_activations=True)
+                        # )
+                    for sae in saes:
+                        sae.mean_error = running_mean_tensor(sae.mean_error, sae.error_term, i+1)
+                    cleanup_cuda()
+                pbar.update(1)
+
+            if i >= total_batches:
+                break
+    return saes
+
 class KeyboardInterruptBlocker:
     def __enter__(self):
         # Block SIGINT and store old mask
@@ -413,7 +438,7 @@ def logit_diff_fn(logits, clean_labels, corr_labels, token_wise=False):
     corr_logits = logits[torch.arange(logits.shape[0]), -1, corr_labels]
     return (clean_logits - corr_logits).mean() if not token_wise else (clean_logits - corr_logits)
 
-def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_dataset, sparsity_multiplier, example_length=6, loss_function='ce', per_token_mask=False, use_mask=False, mean_mask=False, distinct_sparsity_multiplier=0, device="cuda:0"):
+def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_dataset, sparsity_multiplier, example_length=6, task = "sva/rc_train", loss_function='ce', per_token_mask=False, use_mask=True, mean_mask=False, portion_of_data=0.5, distinct_sparsity_multiplier=0, device="cuda:0", use_mean_error=False):
 
     # def logitfn(tokens):
     #     logits =  model.run_with_hooks(
@@ -423,25 +448,30 @@ def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_data
     #         )
     #     return logits
 
-    def forward_pass(model, saes, batch, clean_label_tokens, corr_label_tokens, avg_logit_diff, ratio_trained=1, loss_function='ce', use_mask=use_mask, mean_mask=mean_mask):
+    def forward_pass(model, saes, batch, clean_label_tokens, corr_label_tokens, ratio_trained=1, loss_function='ce', use_mask=use_mask, mean_mask=mean_mask, use_mean_error=use_mean_error):
         for sae in saes:
             sae.mask.ratio_trained = ratio_trained
         tokens = batch
-        logits, _ = run_sae_hook_fn(model, saes, tokens, use_mask=use_mask, mean_mask=mean_mask)
+        logits, _ = run_sae_hook_fn(model, saes, tokens, use_mask=use_mask, mean_mask=mean_mask, use_mean_error=use_mean_error)
+        model_logits, _ = run_sae_hook_fn(model, saes, tokens, use_mask=False, mean_mask=False, use_mean_error=use_mean_error)
         last_token_logits = logits[:, -1, :]
         if loss_function == 'ce':
             loss = F.cross_entropy(last_token_logits, clean_label_tokens)
         elif loss_function == 'logit_diff':
             fwd_logit_diff = logit_diff_fn(logits, clean_label_tokens, corr_label_tokens)
-            loss = torch.abs(avg_logit_diff - fwd_logit_diff)
+            model_logit_diff = logit_diff_fn(model_logits, clean_label_tokens, corr_label_tokens)
+            loss = torch.abs(model_logit_diff - fwd_logit_diff)
+
+        del model_logits, logits
+        cleanup_cuda()
 
         sparsity_loss = 0
-        if per_token_mask:
-            distinct_sparsity_loss = 0
+        # if per_token_mask:
+        distinct_sparsity_loss = 0
         for sae in saes:
             sparsity_loss = sparsity_loss + sae.mask.sparsity_loss
-            if per_token_mask:
-                distinct_sparsity_loss = distinct_sparsity_loss + sae.mask.distinct_sparsity_loss
+            # if per_token_mask:
+            #     distinct_sparsity_loss = distinct_sparsity_loss + sae.mask.distinct_sparsity_loss
         
         sparsity_loss = sparsity_loss / len(saes)
         distinct_sparsity_loss = distinct_sparsity_loss / len(saes)
@@ -453,13 +483,13 @@ def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_data
     config = {
         "batch_size": 16,
         "learning_rate": 0.05,
-        "total_steps": token_dataset.shape[0]*0.5,
+        "total_steps": token_dataset.shape[0]*portion_of_data,
         "sparsity_multiplier": sparsity_multiplier
     }
 
     for sae in saes:
         if per_token_mask:
-            sae.mask = SparseMask(sae.cfg.d_sae, 1.0, seq_len=example_length, distinct_l1=1.0).to(device)
+            sae.mask = SparseMask(sae.cfg.d_sae, 1.0, seq_len=example_length).to(device)
         else:
             sae.mask = SparseMask(sae.cfg.d_sae, 1.0).to(device)
         all_optimized_params.extend(list(sae.mask.parameters()))
@@ -469,29 +499,30 @@ def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_data
     optimizer = optim.Adam(all_optimized_params, lr=config["learning_rate"])
     total_steps = config["total_steps"] #*config["batch_size"]
 
-    with tqdm(total=total_steps, desc="Training Progress") as pbar:
+    with tqdm(total=total_steps*1.1, desc="Training Progress") as pbar:
         for i, (x, y, z) in enumerate(zip(token_dataset, labels_dataset, corr_labels_dataset)):
             with KeyboardInterruptBlocker():
                 optimizer.zero_grad()
                 
                 # Calculate ratio trained
-                ratio_trained = i / total_steps
+                ratio_trained = i / total_steps*1.1
                 
                 # Update mask ratio for each SAE
                 for sae in saes:
                     sae.mask.ratio_trained = ratio_trained
                 
                 # Forward pass with updated ratio_trained
-                loss, sparsity_loss, distinct_sparsity_loss = forward_pass(x, y, z, logitfn, ratio_trained=ratio_trained, loss_function=loss_function)
-                if per_token_mask:
-                    sparsity_loss = sparsity_loss / example_length
+                loss, sparsity_loss, distinct_sparsity_loss = forward_pass(model, saes, x, y, z, ratio_trained=ratio_trained, loss_function=loss_function)
+                # if per_token_mask:
+                #     sparsity_loss = sparsity_loss / example_length
 
                 avg_nonzero_elements = sparsity_loss
-                avg_distinct_nonzero_elements = distinct_sparsity_loss
+                # avg_distinct_nonzero_elements = distinct_sparsity_loss
                     
-                sparsity_loss = sparsity_loss * config["sparsity_multiplier"] + distinct_sparsity_loss * distinct_sparsity_multiplier
+                sparsity_loss = sparsity_loss * config["sparsity_multiplier"] #+ distinct_sparsity_loss * distinct_sparsity_multiplier
                 total_loss = loss + sparsity_loss
-                infodict  = {"Step": i, "Progress": ratio_trained, "Avg Nonzero Elements": avg_nonzero_elements.item(), "avg distinct lat/sae":avg_distinct_nonzero_elements.item(), "Task Loss": loss.item(), "Sparsity Loss": sparsity_loss.item(), "temperature": saes[0].mask.temperature}
+                infodict  = {"Step": i, "Progress": ratio_trained, "Avg Nonzero Elements": avg_nonzero_elements.item(),  "Task Loss": loss.item(), "Sparsity Loss": sparsity_loss.item(), "temperature": saes[0].mask.temperature}
+                #"avg distinct lat/sae":avg_distinct_nonzero_elements.item(),
                 wandb.log(infodict)
                 
                 # Backward pass and optimizer step
@@ -503,7 +534,7 @@ def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_data
                 
                 # Update the tqdm progress bar
                 pbar.update(1)
-                if i >= total_steps*1.3:
+                if i >= total_steps*1.1:
                     break
     wandb.finish()
 
@@ -520,26 +551,15 @@ def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_data
 
     torch.cuda.empty_cache()
 
-    mask_dict = {}
-
-    total_density = 0
-    for sae in saes:
-        mask_dict[sae.cfg.hook_name] = torch.where(sae.mask.mask > 0)[1].tolist()   # rob thinks .view(-1) needed here
-        total_density += (sae.mask.mask > 0).sum().item()
-    mask_dict["total_density"] = total_density
-    mask_dict['avg_density'] = total_density / len(saes)
-
-    if per_token_mask:
-        print("total # latents in circuit: ", total_density)
-    print("avg density", mask_dict['avg_density'])
-
     ### EVAL ###
     def masked_logit_fn(tokens):
-        logits =  model.run_with_hooks(
-            tokens, 
-            return_type="logits", 
-            fwd_hooks=build_hooks_list(tokens, use_mask=use_mask, mean_mask=mean_mask, binarize_mask=True)
-            )
+        logits, _ = run_sae_hook_fn(model, saes, tokens, use_mask=use_mask, mean_mask=mean_mask, binarize_mask=True, use_mean_error=use_mean_error)
+        
+        #model.run_with_hooks(
+            # tokens, 
+            # return_type="logits", 
+            # fwd_hooks=build_hooks_list(tokens, use_mask=use_mask, mean_mask=mean_mask, binarize_mask=True)
+            # )
         return logits
 
     def eval_ce_loss(batch, labels, logitfn, ratio_trained=10):
@@ -555,29 +575,46 @@ def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_data
         for sae in saes:
             sae.mask.ratio_trained = ratio_trained
         avg_ld = 0
+        avg_model_ld = 0
         for i in range(num_batches):
             tokens = batch[-i]
             logits = logitfn(tokens)
+            model_logits = model(tokens)
             ld = logit_diff_fn(logits, clean_labels[-i], corr_labels[-i])
+            model_ld = logit_diff_fn(model_logits, clean_labels[-i], corr_labels[-i])
             avg_ld += ld
-            del logits
+            avg_model_ld += model_ld
+            del logits, model_logits
             cleanup_cuda()
-        return (avg_ld / num_batches).item()
+        return (avg_ld / num_batches).item(), (avg_model_ld / num_batches).item()
 
     with torch.no_grad():
         loss = eval_ce_loss(token_dataset[-1], labels_dataset[-1], masked_logit_fn)
         print("CE loss:", loss)
         cleanup_cuda()
-        logit_diff = eval_logit_diff(10, token_dataset, labels_dataset, corr_labels_dataset, masked_logit_fn)
+        logit_diff, model_logit_diff = eval_logit_diff(10, token_dataset, labels_dataset, corr_labels_dataset, masked_logit_fn)
         print("Logit Diff:", logit_diff)
         cleanup_cuda()
 
-    save_path = f"masks/sva/rc/{loss_function}_{str(sparsity_multiplier)}_run/"
+    mask_dict = {}
+
+    total_density = 0
+    for sae in saes:
+        mask_dict[sae.cfg.hook_name] = torch.where(sae.mask.mask > 0)[1].tolist()   # rob thinks .view(-1) needed here
+        total_density += (sae.mask.mask > 0).sum().item()
+    mask_dict["total_density"] = total_density
+    mask_dict['avg_density'] = total_density / len(saes)
+
+    if per_token_mask:
+        print("total # latents in circuit: ", total_density)
+    print("avg density", mask_dict['avg_density'])
+
+    save_path = f"masks/{task}/{loss_function}_{str(sparsity_multiplier)}_run/"
     os.makedirs(save_path, exist_ok=True)
     mask_dict['ce_loss'] = loss.item()
     mask_dict['logit_diff'] = logit_diff
-    faithfulness = logit_diff / (avg_logit_diff/10)
-    mask_dict['faithfulness'] = faithfulness.item()
+    faithfulness = logit_diff / model_logit_diff
+    mask_dict['faithfulness'] = faithfulness
     
     for idx, sae in enumerate(saes):
         mask_path = f"sae_mask_{idx}.pt"
@@ -585,3 +622,4 @@ def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_data
         print(f"Saved mask for SAE {idx} to {mask_path}")
 
     json.dump(mask_dict, open(os.path.join(save_path,f"{str(sparsity_multiplier)}_run.json"), "w"))
+

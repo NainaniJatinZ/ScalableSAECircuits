@@ -1,218 +1,338 @@
-# %%
-import json
-from sae_lens import SAE, HookedSAETransformer
-from functools import partial
-import einops
 import os
-import gc
+import json
+import argparse
 import torch
-import torch.nn as nn
-import matplotlib.pyplot as plt
-import torch.optim as optim
-from datasets import load_dataset
-from transformers import AutoTokenizer
-from transformer_lens.hook_points import (
-    HookPoint,
-) 
 import numpy as np
 import pandas as pd
-from pprint import pprint as pp
-from typing import Tuple
-from torch import Tensor
-from functools import lru_cache
-from typing import TypedDict, Optional, Tuple, Union
+from functools import partial
 from tqdm import tqdm
-import random
-from helpers.utils import *  
+from collections import defaultdict
+import re
+from sae_lens import SAE, HookedSAETransformer
+from sae_lens.toolkit.pretrained_saes_directory import get_pretrained_saes_directory
+import helpers.utils as utils
+
+##################################
+# Utility Functions
+##################################
+
+def logit_diff_fn(logits, clean_labels, corr_labels, token_wise=False):
+    """
+    Compute logit difference for a batch.
+    """
+    # logits shape: [batch, seq_len, vocab_size]
+    clean_logits = logits[torch.arange(logits.shape[0]), -1, clean_labels]
+    corr_logits = logits[torch.arange(logits.shape[0]), -1, corr_labels]
+    if token_wise:
+        return (clean_logits - corr_logits)
+    else:
+        return (clean_logits - corr_logits).mean()
+
+def parse_args():
+    """
+    Set up argument parsing for controlling:
+    - `task` name
+    - `sae_gap`
+    - `example_length`
+    - `num_batches` (or how many chunks to use)
+    - `batch_size`
+    - `use_mask`, `use_mean_error`, etc.
+    - thresholds for the training step
+    """
+    parser = argparse.ArgumentParser(
+        description="Run a systematic script for hooking in SAEs, computing logit diffs, and optionally doing training."
+    )
+
+    # Basic parameters
+    parser.add_argument("--config_file", type=str, default="config.json",
+                        help="Path to a JSON config file with optional HF token.")
+    parser.add_argument("--hf_cache", type=str, default="/work/pi_jensen_umass_edu/jnainani_umass_edu/mechinterp/huggingface_cache/hub",
+                        help="Path to the Hugging Face cache directory.")
+    parser.add_argument("--task", type=str, default="sva/rc_train",
+                        help="Task subfolder + file name (like 'sva/rc_train'). Will look in data/<task>.json.")
+    parser.add_argument("--example_length", type=int, default=7,
+                        help="Expected length of the tokenized example (used for filtering).")
+    parser.add_argument("--N", type=int, default=3000,
+                        help="How many samples to load from the dataset (max).")
+
+    # Model / SAE parameters
+    parser.add_argument("--model_name", type=str, default="google/gemma-2-9b",
+                        help="Which model to load with HookedSAETransformer.")
+    parser.add_argument("--sae_gap", type=int, default=13,
+                        help="Which gap to use for collecting SAEs. (E.g. load every 13th layer).")
+    parser.add_argument("--layer_l0_target", type=int, default=32,
+                        help="Which L0 value is the target or closest choice for each layer's SAE.")
+    parser.add_argument("--num_batches_eval", type=int, default=10,
+                        help="How many batches to evaluate on when computing average logit diff.")
+    parser.add_argument("--batch_size", type=int, default=16,
+                        help="Batch size to use for chunked inference or training.")
+    
+    # Mask/mean usage
+    parser.add_argument("--use_mask", action="store_true",
+                        help="Whether to use an SAE mask at inference/training time.")
+    parser.add_argument("--mean_mask", action="store_true",
+                        help="Whether to take the average of the mask across tokens (per-token mask).")
+    parser.add_argument("--use_mean_error", action="store_true",
+                        help="Whether to use the error means for the SAE activation instead of the plain mean.")
+    
+    # For the training runs with thresholds
+    parser.add_argument("--run_training_thresholds", action="store_true",
+                        help="Whether to run the threshold-based training loop.")
+    parser.add_argument("--start_threshold", type=float, default=0.01,
+                        help="Lower bound for threshold-based training.")
+    parser.add_argument("--end_threshold", type=float, default=0.2,
+                        help="Upper bound for threshold-based training.")
+    parser.add_argument("--n_threshold_steps", type=int, default=5,
+                        help="Number of steps between start_threshold and end_threshold (inclusive).")
+    parser.add_argument("--portion_of_data", type=float, default=0.3,
+                        help="Portion of data used in the training run for thresholds.")
+
+    return parser.parse_args()
 
 
-# %% model 
+def main():
+    ##############################
+    # Parse Command Line Args
+    ##############################
+    args = parse_args()
 
-with open("config.json", 'r') as file:
-   config = json.load(file)
-token = config.get('huggingface_token', None)
-os.environ["HF_TOKEN"] = token
+    # Potentially load configuration from JSON
+    if os.path.exists(args.config_file):
+        with open(args.config_file, 'r') as file:
+            config = json.load(file)
+        token = config.get('huggingface_token', None)
+        if token is not None:
+            os.environ["HF_TOKEN"] = token
+    else:
+        print(f"WARNING: config file '{args.config_file}' not found. Continuing without it.")
+        token = None
 
-# Define device
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Device: {device}")
+    # Set HF cache environment variable if provided
+    if args.hf_cache:
+        os.environ["HF_HOME"] = args.hf_cache
 
-hf_cache = "/work/pi_jensen_umass_edu/jnainani_umass_edu/mechinterp/huggingface_cache/hub"
-os.environ["HF_HOME"] = hf_cache
+    # Device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
 
-# Load the model
-model = HookedSAETransformer.from_pretrained("google/gemma-2-9b", device=device, cache_dir=hf_cache) 
+    ##############################
+    # Load Model
+    ##############################
+    model = HookedSAETransformer.from_pretrained(
+        args.model_name,
+        device=device,
+        cache_dir=args.hf_cache
+    )
 
-pad_token_id = model.tokenizer.pad_token_id
-for param in model.parameters():
-   param.requires_grad_(False)
+    # Make sure to freeze parameters
+    for param in model.parameters():
+        param.requires_grad_(False)
 
-# %% saes 
-   
-layers= [7, 14, 21, 40]
-l0s = [92, 67, 129, 125]
-saes = [SAE.from_pretrained(release="gemma-scope-9b-pt-res", sae_id=f"layer_{layers[i]}/width_16k/average_l0_{l0s[i]}", device=device)[0] for i in range(len(layers))]
+    # Retrieve any needed info from model
+    pad_token_id = model.tokenizer.pad_token_id
 
-# %%
-import json
-file_path = 'data/sva/rc_train.json'
-with open(file_path, 'r') as file:
-    data = [json.loads(line) for line in file]
-for entry in data:
-    print(entry)
-    break
-example_length = 7
+    ##############################
+    # Load SAEs (Nearest L0)
+    ##############################
+    df = pd.DataFrame.from_records({k:v.__dict__ for k,v in get_pretrained_saes_directory().items()}).T
+    df.drop(columns=["expected_var_explained", "expected_l0", "config_overrides", "conversion_func"], inplace=True)
+    # # This is your custom approach from the notebook:
+    neuronpedia_dict = df.loc['gemma-scope-9b-pt-res']['neuronpedia_id']
+    pattern = re.compile(r'layer_(\d+)/width_16k/average_l0_(\d+)')
+    layer_dict = defaultdict(list)
+    for s in neuronpedia_dict.keys():
+        match = pattern.search(s)
+        if match and neuronpedia_dict[s] is not None:
+            layer = int(match.group(1))
+            l0_value = int(match.group(2))
+            layer_dict[layer].append((s, l0_value))
 
-clean_data = []
-corr_data = []
-clean_labels = []
-corr_labels = []
-for entry in data:
-    if model.to_tokens(entry['clean_prefix']).shape[-1] == example_length:
-        clean_data.append(entry['clean_prefix'])
-        corr_data.append(entry['patch_prefix'])
-        clean_labels.append(entry['clean_answer'])
-        corr_labels.append(entry['patch_answer'])
+    # Find the string with l0 value closest to the user-specified target
+    closest_strings = {}
+    for layer, items in layer_dict.items():
+        closest_string = min(items, key=lambda x: abs(x[1] - args.layer_l0_target))
+        closest_strings[layer] = closest_string[0]
 
-N = 10000
-clean_tokens = model.to_tokens(clean_data[:N])
-corr_tokens = model.to_tokens(corr_data[:N])
-clean_label_tokens = model.to_tokens(clean_labels[:N], prepend_bos=False).squeeze(-1)
-corr_label_tokens = model.to_tokens(corr_labels[:N], prepend_bos=False).squeeze(-1)
-print(clean_tokens.shape, corr_tokens.shape)
-
-batch_size = 16 
-clean_tokens = clean_tokens[:batch_size*(len(clean_tokens)//batch_size)]
-corr_tokens = corr_tokens[:batch_size*(len(corr_tokens)//batch_size)]
-clean_label_tokens = clean_label_tokens[:batch_size*(len(clean_label_tokens)//batch_size)]
-corr_label_tokens = corr_label_tokens[:batch_size*(len(corr_label_tokens)//batch_size)]
-
-clean_tokens = clean_tokens.reshape(-1, batch_size, clean_tokens.shape[-1])
-corr_tokens = corr_tokens.reshape(-1, batch_size, corr_tokens.shape[-1])
-clean_label_tokens = clean_label_tokens.reshape(-1, batch_size)
-corr_label_tokens = corr_label_tokens.reshape(-1, batch_size)
-
-print(clean_tokens.shape, corr_tokens.shape, clean_label_tokens.shape, corr_label_tokens.shape)
-
-# %%
-
-bos_token_id = model.tokenizer.bos_token_id
-
-def build_sae_hook_fn(
-    # Core components
-    sae,
-    sequence,
-    # Masking options
-    circuit_mask: Optional[SAEMasks] = None,
-    use_mask=False,
-    binarize_mask=False,
-    mean_mask=False,
-    ig_mask_threshold=None,
-    # Caching behavior
-    cache_sae_grads=False,
-    cache_masked_activations=False,
-    cache_sae_activations=False,
-    # Ablation options
-    mean_ablate=False,  # Controls mean ablation of the SAE
-    fake_activations=False,  # Controls whether to use fake activations
-    ):    # make the mask for the sequence
-    mask = torch.ones_like(sequence, dtype=torch.bool)
-    # mask[sequence == pad_token_id] = False
-    mask[sequence == bos_token_id] = False # where mask is false, keep original
-    def sae_hook(value, hook):
-        # print(f"sae {sae.cfg.hook_name} running at layer {hook.layer()}")
-        feature_acts = sae.encode(value)
-        feature_acts = feature_acts * mask.unsqueeze(-1)
-        if fake_activations != False and sae.cfg.hook_layer == fake_activations[0]:
-            feature_acts = fake_activations[1]
-        if cache_sae_grads:
-            raise NotImplementedError("torch is confusing")
-            sae.feature_acts = feature_acts.requires_grad_(True)
-            sae.feature_acts.retain_grad()
-        
-        if cache_sae_activations:
-            sae.feature_acts = feature_acts.detach().clone()
-        
-        # Learned Binary Masking
-        if use_mask:
-            if mean_mask:
-                # apply the mask, with mean ablations
-                feature_acts = sae.mask(feature_acts, binary=binarize_mask, mean_ablation=sae.mean_ablation)
-            else:
-                # apply the mask, without mean ablations
-                feature_acts = sae.mask(feature_acts, binary=binarize_mask)
-
-        # IG Masking
-        if ig_mask_threshold != None:
-            # apply the ig mask
-            if mean_mask:
-                feature_acts = sae.igmask(feature_acts, threshold=ig_mask_threshold, mean_ablation=sae.mean_ablation)
-            else:
-                feature_acts = sae.igmask(feature_acts, threshold=ig_mask_threshold)
-
-                
-        if circuit_mask is not None:
-            hook_point = sae.cfg.hook_name
-            if mean_mask==True:
-                feature_acts = circuit_mask(feature_acts, hook_point, mean_ablation=sae.mean_ablation)
-            else:
-                feature_acts = circuit_mask(feature_acts, hook_point)
-            
-        if cache_masked_activations:
-            sae.feature_acts = feature_acts.detach().clone()
-        if mean_ablate:
-            feature_acts = sae.mean_ablation
-
-        out = sae.decode(feature_acts)
-        # choose out or value based on the mask
-        mask_expanded = mask.unsqueeze(-1).expand_as(value)
-        value = torch.where(mask_expanded, out, value)
-        return value
-    return sae_hook
-
-
-def build_hooks_list(sequence,
-                    cache_sae_activations=False,
-                    cache_sae_grads=False,
-                    circuit_mask=None,
-                    use_mask=False,
-                    binarize_mask=False,
-                    mean_mask=False,
-                    cache_masked_activations=False,
-                    mean_ablate=False,
-                    fake_activations: Tuple[int, torch.Tensor] = False,
-                    ig_mask_threshold=None,
-                    ):
-    hooks = []
-    for sae in saes:
-        hooks.append(
-            (
-            sae.cfg.hook_name,
-            build_sae_hook_fn(sae, sequence, cache_sae_grads=cache_sae_grads, circuit_mask=circuit_mask, use_mask=use_mask, binarize_mask=binarize_mask, cache_masked_activations=cache_masked_activations, cache_sae_activations=cache_sae_activations, mean_mask=mean_mask, mean_ablate=mean_ablate, fake_activations=fake_activations, ig_mask_threshold=ig_mask_threshold),
+    # Actually load the SAEs
+    layers = [i for i in range(0, model.cfg.n_layers, args.sae_gap)]
+    saes = []
+    for layer in tqdm(layers):
+        sae_id = closest_strings.get(layer, None)
+        if sae_id is not None:
+            sae, _metadata = SAE.from_pretrained(
+                release="gemma-scope-9b-pt-res",
+                sae_id=sae_id,
+                device=device
             )
-        )
-    return hooks 
+            saes.append(sae)
+        else:
+            print(f"Warning: No matching SAE ID found for layer {layer} with L0 target {args.layer_l0_target}")
 
+    ##############################
+    # Load Data
+    ##############################
+    # Example: data/<task>.json
+    data_path = f"data/{args.task}.json"
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Data file {data_path} not found.")
 
-# %%
-use_mask = False 
-mean_mask = False
-avg_logit_diff = 0
-cleanup_cuda()
-with torch.no_grad():
-    for i in range(10):
-        logits = model.run_with_hooks(
-            clean_tokens[i], 
-            return_type="logits", 
-            fwd_hooks=build_hooks_list(clean_tokens[i], use_mask=use_mask, mean_mask=mean_mask)
+    with open(data_path, 'r') as f:
+        data = [json.loads(line) for line in f]
+
+    # Some sample checks
+    if not data:
+        raise ValueError("Loaded data is empty!")
+
+    # Filter dataset by example_length
+    clean_data = []
+    corr_data = []
+    clean_labels = []
+    corr_labels = []
+    
+    for entry in data:
+        clean_len = len(model.tokenizer(entry['clean_prefix']).input_ids)
+        corr_len = len(model.tokenizer(entry['patch_prefix']).input_ids)
+        if clean_len == corr_len == args.example_length:
+            clean_data.append(entry['clean_prefix'])
+            corr_data.append(entry['patch_prefix'])
+            clean_labels.append(entry['clean_answer'])
+            corr_labels.append(entry['patch_answer'])
+    
+    # Limit to top N
+    clean_data = clean_data[:args.N]
+    corr_data = corr_data[:args.N]
+    clean_labels = clean_labels[:args.N]
+    corr_labels = corr_labels[:args.N]
+
+    # Tokenize
+    clean_tokens = model.to_tokens(clean_data)
+    corr_tokens = model.to_tokens(corr_data)
+    clean_label_tokens = model.to_tokens(clean_labels, prepend_bos=False).squeeze(-1)
+    corr_label_tokens = model.to_tokens(corr_labels, prepend_bos=False).squeeze(-1)
+
+    # Reshape into batches
+    n_batches_total = (len(clean_tokens) // args.batch_size)
+    clean_tokens = clean_tokens[:n_batches_total*args.batch_size]
+    corr_tokens = corr_tokens[:n_batches_total*args.batch_size]
+    clean_label_tokens = clean_label_tokens[:n_batches_total*args.batch_size]
+    corr_label_tokens = corr_label_tokens[:n_batches_total*args.batch_size]
+
+    clean_tokens = clean_tokens.reshape(-1, args.batch_size, clean_tokens.shape[-1])
+    corr_tokens = corr_tokens.reshape(-1, args.batch_size, corr_tokens.shape[-1])
+    clean_label_tokens = clean_label_tokens.reshape(-1, args.batch_size)
+    corr_label_tokens = corr_label_tokens.reshape(-1, args.batch_size)
+
+    print("Number of total batches after reshape:", clean_tokens.shape[0])
+
+    ####################################
+    # Evaluate full model logit diff
+    ####################################
+    # (This is just an example demonstration.)
+
+    print("Computing average full model logit diff (clean vs corr)...")
+    avg_model_diff = 0.0
+    # utils.cleanup_cuda()
+    with torch.no_grad():
+        for i in range(min(args.num_batches_eval, clean_tokens.shape[0])):
+            logits = model(clean_tokens[i])  # shape [batch_size, seq_len, vocab_size]
+            ld = logit_diff_fn(logits, clean_label_tokens[i], corr_label_tokens[i])
+            avg_model_diff += ld
+    avg_model_diff = (avg_model_diff / min(args.num_batches_eval, clean_tokens.shape[0])).item()
+    print("Average Full Model LD:", avg_model_diff)
+
+    ####################################
+    # Evaluate model + SAEs
+    ####################################
+    # # If you want to run the model with SAEs directly:
+    # # E.g., using a custom utility like `utils.run_sae_hook_fn(model, saes, ...)`.
+    # # reset hooks if your library requires it
+    # model.reset_hooks(including_permanent=True)
+    # model.reset_saes()
+
+    avg_logit_diff = 0.0
+    with torch.no_grad():
+        for i in range(min(args.num_batches_eval, clean_tokens.shape[0])):
+            logits, saes = utils.run_sae_hook_fn(model, saes, clean_tokens[i], use_mean_error=False)
+            ld = logit_diff_fn(logits, clean_label_tokens[i], corr_label_tokens[i])
+            avg_logit_diff += ld
+    avg_logit_diff = (avg_logit_diff / min(args.num_batches_eval, clean_tokens.shape[0])).item()
+    print("Average Model + SAEs LD:", avg_logit_diff)
+
+    ####################################
+    # Compute means & error means for SAEs
+    ####################################
+    if args.use_mask:
+        # Example usage of a custom utility to create a mask
+        for sae in saes:
+            sae.mask = utils.SparseMask(sae.cfg.d_sae, 1.0, seq_len=args.example_length).to(device)
+    
+    saes = utils.get_sae_means(model, saes, corr_tokens, num_batches=40, batch_size=16)
+    saes = utils.get_sae_error_means(model, saes, corr_tokens, num_batches=40, batch_size=16)
+
+    ####################################
+    # Evaluate model + SAEs with error means
+    ####################################
+    # # reset hooks again
+    # model.reset_hooks(including_permanent=True)
+    # model.reset_saes()
+    save_task = args.task + "_saegap" + str(args.sae_gap)
+    if args.use_mean_error:
+        save_task += "_mean_error"
+        avg_logit_err_diff = 0.0
+        with torch.no_grad():
+            for i in range(min(args.num_batches_eval, clean_tokens.shape[0])):
+                logits, saes = utils.run_sae_hook_fn(
+                    model, saes, clean_tokens[i], use_mean_error=True
+                )
+                ld = logit_diff_fn(logits, clean_label_tokens[i], corr_label_tokens[i])
+                avg_logit_err_diff += ld
+        avg_logit_err_diff = (avg_logit_err_diff / min(args.num_batches_eval, clean_tokens.shape[0])).item()
+        print("Average Model + SAEs (Mean Error) LD:", avg_logit_err_diff)
+
+    ####################################
+    # Optionally do training with thresholds
+    ####################################
+    if args.run_training_thresholds:
+        # For example, you can create a list of thresholds
+        def modify_fn(x):
+            return x**2
+        
+        def linear_map(x, start, end):
+            mod_start = modify_fn(start)
+            mod_end = modify_fn(end)
+            return (x - mod_start) / (mod_end - mod_start) * (end - start) + start
+
+        # Create thresholds from start_threshold to end_threshold in n_threshold_steps
+        thresholds = []
+        n_runs = args.n_threshold_steps
+        delta = (args.end_threshold - args.start_threshold) / float(n_runs)
+        for i in range(n_runs):
+            thresholds.append(linear_map(modify_fn(args.start_threshold + i*delta),args.start_threshold,args.end_threshold))
+            # thresholds.append(args.start_threshold + i*delta)
+
+        print("Thresholds to run training on:", thresholds)
+
+        # Example usage of a custom training utility:
+        for thr in thresholds:
+            utils.do_training_run(
+                model=model,
+                saes=saes,
+                token_dataset=clean_tokens,
+                labels_dataset=clean_label_tokens,
+                corr_labels_dataset=corr_label_tokens,
+                sparsity_multiplier=thr,
+                task=save_task,
+                example_length=args.example_length,
+                loss_function="logit_diff",
+                per_token_mask=args.mean_mask,
+                use_mask=args.use_mask,
+                mean_mask=args.mean_mask,
+                portion_of_data=args.portion_of_data,
+                use_mean_error=args.use_mean_error
             )
-        ld = logit_diff_fn(logits, clean_label_tokens[i], corr_label_tokens[i])
-        avg_logit_diff += ld
-        del logits
-        cleanup_cuda()
-avg_logit_diff = (avg_logit_diff / 10).item()
-print("Average LD: ", avg_logit_diff)
-# %%
+            print(f"Training run complete for threshold={thr}")
 
+    print("Script finished successfully.")
 
-
+if __name__ == "__main__":
+    main()
