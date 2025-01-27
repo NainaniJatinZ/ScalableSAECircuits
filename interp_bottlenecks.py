@@ -60,7 +60,7 @@ def parse_args():
                         help="Which model to load with HookedSAETransformer.")
     parser.add_argument("--sae_gap", type=int, default=13,
                         help="Which gap to use for collecting SAEs. (E.g. load every 13th layer).")
-    parser.add_argument("--layer_l0_target", type=int, default=32,
+    parser.add_argument("--layer_l0_target", type=int, default=100,
                         help="Which L0 value is the target or closest choice for each layer's SAE.")
     parser.add_argument("--num_batches_eval", type=int, default=10,
                         help="How many batches to evaluate on when computing average logit diff.")
@@ -74,6 +74,7 @@ def parse_args():
                         help="Whether to take the average of the mask across tokens (per-token mask).")
     parser.add_argument("--use_mean_error", action="store_true",
                         help="Whether to use the error means for the SAE activation instead of the plain mean.")
+    parser.add_argument("--per_token_mask", action="store_true")
     
     # For the training runs with thresholds
     parser.add_argument("--run_training_thresholds", action="store_true",
@@ -137,7 +138,11 @@ def main():
     df = pd.DataFrame.from_records({k:v.__dict__ for k,v in get_pretrained_saes_directory().items()}).T
     df.drop(columns=["expected_var_explained", "expected_l0", "config_overrides", "conversion_func"], inplace=True)
     # # This is your custom approach from the notebook:
-    neuronpedia_dict = df.loc['gemma-scope-9b-pt-res']['neuronpedia_id']
+    if args.model_name == "google/gemma-2-9b":
+        release_name = "gemma-scope-9b-pt-res"
+    elif args.model_name == "google/gemma-2-2b":
+        release_name = "gemma-scope-2b-pt-res"
+    neuronpedia_dict = df.loc[release_name]['saes_map']
     pattern = re.compile(r'layer_(\d+)/width_16k/average_l0_(\d+)')
     layer_dict = defaultdict(list)
     for s in neuronpedia_dict.keys():
@@ -159,11 +164,11 @@ def main():
     for layer in tqdm(layers):
         sae_id = closest_strings.get(layer, None)
         if sae_id is not None:
-            sae, _metadata = SAE.from_pretrained(
-                release="gemma-scope-9b-pt-res",
+            sae = SAE.from_pretrained(
+                release=release_name,
                 sae_id=sae_id,
                 device=device
-            )
+            )[0]
             saes.append(sae)
         else:
             print(f"Warning: No matching SAE ID found for layer {layer} with L0 target {args.layer_l0_target}")
@@ -266,8 +271,8 @@ def main():
         for sae in saes:
             sae.mask = utils.SparseMask(sae.cfg.d_sae, 1.0, seq_len=args.example_length).to(device)
     
-    saes = utils.get_sae_means(model, saes, corr_tokens, num_batches=40, batch_size=16)
-    saes = utils.get_sae_error_means(model, saes, corr_tokens, num_batches=40, batch_size=16)
+    saes = utils.get_sae_means(model, saes, corr_tokens, total_batches=40, batch_size=16)
+    saes = utils.get_sae_error_means(model, saes, corr_tokens, total_batches=40, batch_size=16)
 
     ####################################
     # Evaluate model + SAEs with error means
@@ -324,7 +329,7 @@ def main():
                 task=save_task,
                 example_length=args.example_length,
                 loss_function="logit_diff",
-                per_token_mask=args.mean_mask,
+                per_token_mask=args.per_token_mask,
                 use_mask=args.use_mask,
                 mean_mask=args.mean_mask,
                 portion_of_data=args.portion_of_data,

@@ -1,0 +1,1 @@
+{"blocks.0.hook_resid_post": [3974], "blocks.6.hook_resid_post": [11417], "blocks.12.hook_resid_post": [10678], "blocks.18.hook_resid_post": [1506, 10665, 10665], "blocks.24.hook_resid_post": [454, 2765, 3627, 7780, 13078, 14129], "total_density": 12, "avg_density": 2.4, "ce_loss": 4.216590404510498, "logit_diff": 2.0991456508636475, "faithfulness": 0.6530965256303773}

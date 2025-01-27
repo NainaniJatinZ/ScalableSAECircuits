@@ -438,7 +438,7 @@ def logit_diff_fn(logits, clean_labels, corr_labels, token_wise=False):
     corr_logits = logits[torch.arange(logits.shape[0]), -1, corr_labels]
     return (clean_logits - corr_logits).mean() if not token_wise else (clean_logits - corr_logits)
 
-def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_dataset, sparsity_multiplier, example_length=6, task = "sva/rc_train", loss_function='ce', per_token_mask=False, use_mask=True, mean_mask=False, portion_of_data=0.5, distinct_sparsity_multiplier=0, device="cuda:0", use_mean_error=False):
+def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_dataset, sparsity_multiplier, example_length=6, task = "sva/rc_train", loss_function='ce', per_token_mask=False, use_mask=True, mean_mask=False, portion_of_data=0.5, distinct_sparsity_multiplier=0, device="cuda:0", use_mean_error=False, use_error=False):
 
     # def logitfn(tokens):
     #     logits =  model.run_with_hooks(
@@ -448,11 +448,11 @@ def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_data
     #         )
     #     return logits
 
-    def forward_pass(model, saes, batch, clean_label_tokens, corr_label_tokens, ratio_trained=1, loss_function='ce', use_mask=use_mask, mean_mask=mean_mask, use_mean_error=use_mean_error):
+    def forward_pass(model, saes, batch, clean_label_tokens, corr_label_tokens, ratio_trained=1, loss_function='ce', use_mask=use_mask, mean_mask=mean_mask, use_mean_error=use_mean_error, use_error=use_error):
         for sae in saes:
             sae.mask.ratio_trained = ratio_trained
         tokens = batch
-        logits, _ = run_sae_hook_fn(model, saes, tokens, use_mask=use_mask, mean_mask=mean_mask, use_mean_error=use_mean_error)
+        logits, _ = run_sae_hook_fn(model, saes, tokens, use_mask=use_mask, mean_mask=mean_mask, use_mean_error=use_mean_error, calc_error=use_error, use_error=use_error)
         model_logits, _ = run_sae_hook_fn(model, saes, tokens, use_mask=False, mean_mask=False, use_mean_error=use_mean_error)
         last_token_logits = logits[:, -1, :]
         if loss_function == 'ce':
@@ -600,7 +600,11 @@ def do_training_run(model, saes, token_dataset, labels_dataset, corr_labels_data
 
     total_density = 0
     for sae in saes:
-        mask_dict[sae.cfg.hook_name] = torch.where(sae.mask.mask > 0)[1].tolist()   # rob thinks .view(-1) needed here
+        if per_token_mask:
+            mask_dict[sae.cfg.hook_name] = torch.where(sae.mask.mask > 0)[1].tolist()
+        else:
+            mask_dict[sae.cfg.hook_name] = torch.where(sae.mask.mask > 0)[0].tolist()
+        #torch.where(sae.mask.mask > 0)[1].tolist()   # rob thinks .view(-1) needed here
         total_density += (sae.mask.mask > 0).sum().item()
     mask_dict["total_density"] = total_density
     mask_dict['avg_density'] = total_density / len(saes)
